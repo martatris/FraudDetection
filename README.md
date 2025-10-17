@@ -1,4 +1,4 @@
-# CREDIT CARD FRAUD DETECTION USING MACHINE LEARNING IN R
+# Credit Card Fraud Detection Using Machine Learning in R
 
 1. PROJECT OVERVIEW
 -------------------
