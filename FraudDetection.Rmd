@@ -1,0 +1,295 @@
+---
+title: "Credit Card Fraud Detection Project in R"
+author: "Triston Aloyssius Marta"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Load Packages
+
+```{r load-packages}
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+required <- c("data.table", "dplyr", "ggplot2", "caret", "ROSE", "smotefamily",
+              "randomForest", "xgboost", "pROC", "PRROC", "rpart", "rpart.plot",
+              "nnet", "lightgbm")
+
+install_if_missing <- function(pkgs){
+  to_install <- pkgs[!(pkgs %in% installed.packages()[, "Package"])]
+  if(length(to_install)) install.packages(to_install, dependencies = TRUE)
+}
+
+install_if_missing(required)
+lapply(required, library, character.only = TRUE)
+```
+
+## Load and Explore the Dataset
+
+```{r load-data}
+# Load dataset
+data <- fread('creditcard.csv')
+str(data)
+summary(data)
+
+# Check class balance
+table(data$Class)
+prop.table(table(data$Class))
+```
+
+## Exploratory Data Analysis
+
+```{r eda}
+# Visualize class imbalance
+ggplot(data, aes(x = as.factor(Class), fill = as.factor(Class))) +
+  geom_bar() +
+  scale_fill_manual(values = c("steelblue", "tomato")) +
+  labs(title = "Fraud Class Distribution", x = "Class", y = "Count") +
+  theme_minimal()
+
+# Transaction Amount distribution
+ggplot(data, aes(x = Amount)) + geom_histogram(bins = 50, fill = 'skyblue') +
+  scale_x_log10() + theme_minimal() + labs(title = 'Distribution of Transaction Amounts')
+
+# Correlation heatmap
+corr_matrix <- cor(data[, -which(names(data) == "Class"), with = FALSE])
+heatmap(corr_matrix, symm = TRUE, main = "Correlation Heatmap")
+```
+
+## Data Preprocessing
+
+```{r preprocess}
+set.seed(123)
+
+# Normalize 'Amount' and 'Time'
+data$Amount <- scale(data$Amount)
+data$Time <- scale(data$Time)
+
+# Split dataset into train/test
+trainIndex <- createDataPartition(data$Class, p = 0.8, list = FALSE)
+train <- data[trainIndex, ]
+test <- data[-trainIndex, ]
+
+# Convert target variable to factor
+train$Class <- as.factor(train$Class)
+test$Class <- as.factor(test$Class)
+```
+
+## Handle Class Imbalance (Using SMOTE)
+
+```{r smote}
+set.seed(42)
+
+# Ensure training data is in correct format
+X <- as.data.frame(train[, -which(names(train) == "Class"), with = FALSE])
+y <- as.factor(train$Class)
+
+# Apply SMOTE using smotefamily
+smote_out <- SMOTE(X, y, K = 5, dup_size = 0)
+
+# Recombine results into a single dataset
+smote_train <- smote_out$data
+colnames(smote_train)[ncol(smote_train)] <- "Class"
+smote_train$Class <- as.factor(smote_train$Class)
+
+# Verify class balance
+table(smote_train$Class)
+```
+
+## Model Training
+
+### 1. Logistic Regression
+```{r logistic-regression}
+log_model <- glm(Class ~ ., data = smote_train, family = binomial)
+log_pred <- predict(log_model, newdata = test, type = 'response')
+log_class <- ifelse(log_pred > 0.5, 1, 0)
+```
+
+### 2. Decision Tree
+```{r decision-tree}
+tree_model <- rpart(Class ~ ., data = smote_train, method = 'class')
+rpart.plot(tree_model)
+tree_pred <- predict(tree_model, test, type = 'class')
+```
+
+### 3. Random Forest
+```{r random-forest}
+rf_model <- randomForest(Class ~ ., data = smote_train, ntree = 100, mtry = 6)
+rf_pred <- predict(rf_model, test)
+```
+
+### 4. XGBoost
+```{r xgboost, message=FALSE, warning=FALSE}
+# Make sure both are data.tables
+library(data.table)
+smote_train <- as.data.table(smote_train)
+test <- as.data.table(test)
+
+# Convert target labels
+train_y <- as.numeric(as.character(smote_train$Class))
+test_y <- as.numeric(as.character(test$Class))
+train_y[is.na(train_y)] <- 0
+test_y[is.na(test_y)] <- 0
+
+# Ensure same columns between train/test
+common_cols <- intersect(
+  names(smote_train)[!names(smote_train) %in% "Class"],
+  names(test)[!names(test) %in% "Class"]
+)
+
+# Proper data.table column selection
+train_x <- as.matrix(smote_train[, ..common_cols])
+test_x  <- as.matrix(test[, ..common_cols])
+
+# Confirm equal dimensions
+cat("Train X:", nrow(train_x), "| Train Y:", length(train_y), "\n")
+cat("Test X:", nrow(test_x), "| Test Y:", length(test_y), "\n")
+
+# Ensure row/label match
+stopifnot(nrow(train_x) == length(train_y))
+stopifnot(nrow(test_x) == length(test_y))
+
+# Create DMatrix for xgboost
+train_matrix <- xgb.DMatrix(data = train_x, label = train_y)
+test_matrix  <- xgb.DMatrix(data = test_x,  label = test_y)
+
+# Set parameters
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 6,
+  eta = 0.1,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+set.seed(42)
+xgb_model <- xgb.train(
+  params = params,
+  data = train_matrix,
+  nrounds = 100,
+  verbose = 0
+)
+
+# Predictions
+xgb_pred  <- predict(xgb_model, test_matrix)
+xgb_class <- ifelse(xgb_pred > 0.5, 1, 0)
+```
+
+### 5. Neural Network
+```{r neural-network}
+nn_model <- nnet(Class ~ ., data = smote_train, size = 5, maxit = 500, decay = 0.01)
+nn_pred <- predict(nn_model, test, type = 'raw')
+nn_class <- ifelse(nn_pred > 0.5, 1, 0)
+```
+
+### 6. LightGBM
+```{r lightgbm, message=FALSE, warning=FALSE}
+library(lightgbm)
+
+# Make sure data.tables are consistent
+smote_train <- as.data.table(smote_train)
+test <- as.data.table(test)
+
+# Convert Class to numeric
+train_y <- as.numeric(as.character(smote_train$Class))
+test_y <- as.numeric(as.character(test$Class))
+train_y[is.na(train_y)] <- 0
+test_y[is.na(test_y)] <- 0
+
+# Get consistent column names (same as in XGBoost section)
+common_cols <- intersect(
+  names(smote_train)[!names(smote_train) %in% "Class"],
+  names(test)[!names(test) %in% "Class"]
+)
+
+# Convert to matrix
+train_x <- as.matrix(smote_train[, ..common_cols])
+test_x  <- as.matrix(test[, ..common_cols])
+
+# Double-check consistency
+cat("LightGBM Train X:", nrow(train_x), "Train Y:", length(train_y), "\n")
+cat("LightGBM Test X:", nrow(test_x), "Test Y:", length(test_y), "\n")
+
+# Validate dimensions
+stopifnot(nrow(train_x) == length(train_y))
+stopifnot(nrow(test_x) == length(test_y))
+
+# Create LightGBM dataset
+train_lgb <- lgb.Dataset(data = train_x, label = train_y)
+
+# LightGBM parameters
+params_lgb <- list(
+  objective = "binary",
+  metric = "auc",
+  learning_rate = 0.05,
+  num_leaves = 31,
+  feature_fraction = 0.8,
+  bagging_fraction = 0.8,
+  bagging_freq = 5
+)
+
+# Train model
+set.seed(42)
+lgb_model <- lgb.train(
+  params = params_lgb,
+  data = train_lgb,
+  nrounds = 100,
+  verbose = -1
+)
+
+# Predict on test data
+lgb_pred  <- predict(lgb_model, test_x)
+lgb_class <- ifelse(lgb_pred > 0.5, 1, 0)
+```
+
+## Model Evaluation
+
+```{r evaluation}
+# Function to compute metrics
+get_metrics <- function(true, pred_prob, pred_class) {
+  auc <- roc(true, pred_prob)$auc
+  cm <- confusionMatrix(as.factor(pred_class), as.factor(true), positive = "1")
+  acc <- cm$overall["Accuracy"]
+  recall <- cm$byClass["Recall"]
+  precision <- cm$byClass["Precision"]
+  f1 <- cm$byClass["F1"]
+  data.frame(AUC = auc, Accuracy = acc, Recall = recall, Precision = precision, F1 = f1)
+}
+
+# Compute metrics for each model
+results <- rbind(
+  cbind(Model = 'Logistic Regression', get_metrics(test$Class, log_pred, log_class)),
+  cbind(Model = 'Decision Tree', get_metrics(test$Class, as.numeric(tree_pred), tree_pred)),
+  cbind(Model = 'Random Forest', get_metrics(test$Class, as.numeric(rf_pred), rf_pred)),
+  cbind(Model = 'XGBoost', get_metrics(test$Class, xgb_pred, xgb_class)),
+  cbind(Model = 'Neural Network', get_metrics(test$Class, nn_pred, nn_class)),
+  cbind(Model = 'LightGBM', get_metrics(test$Class, lgb_pred, lgb_class))
+)
+
+results
+
+# Visualize performance comparison
+ggplot(results, aes(x = Model, y = AUC, fill = Model)) +
+  geom_bar(stat = 'identity') +
+  theme_minimal() +
+  labs(title = 'Model Comparison - AUC Scores') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Save Best Model
+
+```{r save-model}
+best_model <- rf_model
+saveRDS(best_model, 'best_model_rf.rds')
+
+# Load model
+test_model <- readRDS('best_model_rf.rds')
+
+# Predict new transaction
+predict_fraud <- function(newdata) {
+  predict(test_model, newdata = newdata, type = 'class')
+}
+```
