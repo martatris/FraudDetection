@@ -1,6 +1,4 @@
-=============================================
-CREDIT CARD FRAUD DETECTION PROJECT - README
-=============================================
+# CREDIT CARD FRAUD DETECTION PROJECT - README
 
 1. PROJECT OVERVIEW
 -------------------
